@@ -16,12 +16,14 @@ benchmark:
 
 # --- Below only needed for releasing new versions
 
-LIB_PG_QUERY_TAG = 17-6.2.2
+LIB_PG_QUERY_TAG = fingerprint-options
+
+# 17-6.2.2
 
 root_dir := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 LIB_TMPDIR = $(root_dir)/tmp
 LIBDIR = $(LIB_TMPDIR)/libpg_query
-LIBDIRGZ = $(TMPDIR)/libpg_query-$(LIB_PG_QUERY_TAG).tar.gz
+LIBDIRGZ = $(LIB_TMPDIR)/libpg_query-$(LIB_PG_QUERY_TAG).tar.gz
 
 $(LIBDIR): $(LIBDIRGZ)
 	mkdir -p $(LIBDIR)
@@ -32,7 +34,7 @@ $(LIBDIRGZ):
 	curl -o $(LIBDIRGZ) https://codeload.github.com/pganalyze/libpg_query/tar.gz/$(LIB_PG_QUERY_TAG)
 
 update_source: clean $(LIBDIR)
-	rm -f parser/*.{c,h}
+	rm -f parser/*.c parser/*.h
 	rm -fr parser/include
 	# Reduce everything down to one directory
 	cp -a $(LIBDIR)/src/* parser/
@@ -40,7 +42,7 @@ update_source: clean $(LIBDIR)
 	rm parser/pg_query_outfuncs_protobuf_cpp.cc
 	mv parser/postgres/* parser/
 	rmdir parser/postgres
-	cp -a $(LIBDIR)/{pg_query.h,postgres_deparse.h} parser/include
+	cp -a $(LIBDIR)/pg_query.h $(LIBDIR)/postgres_deparse.h parser/include
 	# Protobuf definitions
 	mkdir -p $(PWD)/bin
 	GOBIN=$(PWD)/bin go install google.golang.org/protobuf/cmd/protoc-gen-go
@@ -58,9 +60,8 @@ update_source: clean $(LIBDIR)
 	cp -a $(LIBDIR)/vendor/xxhash/*.h parser/include
 	cp -a $(LIBDIR)/vendor/xxhash/*.h parser/include/xxhash
 	cp -a $(LIBDIR)/vendor/xxhash/*.c parser/
-	# Other support files
-	rm -fr testdata
-	cp -a $(LIBDIR)/testdata testdata
+	# Other support files (testdata is only present in release tags, not all branches)
+	if [ -d $(LIBDIR)/testdata ]; then rm -fr testdata; cp -a $(LIBDIR)/testdata testdata; fi
 	bash scripts/gokeep.sh
 
 clean:
