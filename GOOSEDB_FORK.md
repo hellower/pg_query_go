@@ -104,6 +104,10 @@ levels). Before/after, same binary otherwise:
 | 128KB (`chain` 64000) | FATAL, process exits | `stack depth limit exceeded` |
 | 409KB (`chain` 204800) | SIGSEGV | `stack depth limit exceeded` |
 
+Both output paths are covered. `pg_query_parse` (JSON) and
+`pg_query_parse_protobuf` return `stack depth limit exceeded` at every depth
+tested, up to 500KB of input; neither kills the process.
+
 Control group — large but shallow input must keep working, and does:
 `SELECT true OR true …` ×100000 (800KB, nesting depth 11) and
 `SELECT ((((1))))` ×8000 both still return normally.
@@ -118,6 +122,15 @@ porting these changes upstream (`test/deparse` aborted in `mfm_free` on the
 first query); pg_query_go does not expose that entry point, so no Go consumer
 could reach it. A sweep of every `__unpack` / `__free_unpacked` pair in `src/`
 found no other mismatch.
+
+**`v6.2.2-goosedb.3`** — the JSON output path was still unguarded. Only the
+protobuf serializer had `check_stack_depth()`, and only the protobuf entry point
+had its own `PG_TRY` around serialization, so `pg_query_parse()` /
+`ParseToJSON()` still died on deeply nested input (SIGSEGV, then -- once the
+check was added -- a FATAL exit, because the ereport had no exception stack).
+Both are fixed the same way as the protobuf path. Found while porting these
+changes to libpg_query, whose primary C entry point is the JSON one; pg_query_go
+exposes `ParseToJSON` too, so this was reachable from Go as well.
 
 ## Maintaining this fork
 

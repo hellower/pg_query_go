@@ -135,9 +135,45 @@ PgQueryParseResult pg_query_parse_opts(const char* input, int parser_options)
 	result.stderr_buffer = parsetree_and_error.stderr_buffer;
 	result.error = parsetree_and_error.error;
 
-	tree_json = pg_query_nodes_to_json(parsetree_and_error.tree);
-	result.parse_tree = strdup(tree_json);
-	pfree(tree_json);
+	/*
+	 * NOTE (goosedb fork): same reasoning as the protobuf path below -- the
+	 * serialization walk needs its own PG_TRY, because pg_query_raw_parse()'s
+	 * has already ended and an ereport() with no exception stack escalates to
+	 * FATAL (the process exits instead of returning an error).
+	 */
+	if (result.error == NULL)
+	{
+		MemoryContext serialize_context = CurrentMemoryContext;
+
+		PG_TRY();
+		{
+			tree_json = pg_query_nodes_to_json(parsetree_and_error.tree);
+			result.parse_tree = strdup(tree_json);
+			pfree(tree_json);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *error_data;
+			PgQueryError *error;
+
+			MemoryContextSwitchTo(serialize_context);
+			error_data = CopyErrorData();
+
+			/* malloc so it survives exiting the memory context (as above) */
+			error = malloc(sizeof(PgQueryError));
+			error->message   = strdup(error_data->message);
+			error->filename  = strdup(error_data->filename);
+			error->funcname  = strdup(error_data->funcname);
+			error->context   = NULL;
+			error->lineno    = error_data->lineno;
+			error->cursorpos = error_data->cursorpos;
+
+			result.error = error;
+			result.parse_tree = NULL;
+			FlushErrorState();
+		}
+		PG_END_TRY();
+	}
 
 	pg_query_exit_memory_context(ctx);
 
