@@ -97,7 +97,13 @@ pg_query_deparse_comments_for_query(const char *query)
 		return result;
 	}
 
-	PgQuery__ScanResult *scan_result = pg_query__scan_result__unpack(NULL, scan_result_raw.pbuf.len, (void *) scan_result_raw.pbuf.data);
+	PgQuery__ScanResult *scan_result = pg_query__scan_result__unpack(&pg_query_protobuf_allocator, scan_result_raw.pbuf.len, (void *) scan_result_raw.pbuf.data);
+
+	/* goosedb fork: NULL now also means "nesting/stack limit reached" */
+	if (scan_result == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_STATEMENT_TOO_COMPLEX),
+				 errmsg("could not decode scan result")));
 	bool		prior_token_was_comment = false;
 	int32_t		prior_non_comment_end = 0;
 	int32_t		prior_token_end = 0;
