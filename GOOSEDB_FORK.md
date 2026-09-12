@@ -108,6 +108,17 @@ Control group — large but shallow input must keep working, and does:
 `SELECT true OR true …` ×100000 (800KB, nesting depth 11) and
 `SELECT ((((1))))` ×8000 both still return normally.
 
+## Fix history
+
+**`v6.2.2-goosedb.2`** — allocator mismatch in `pg_query_deparse_comments_for_query`.
+The unpack was switched to the palloc-backed allocator but the matching
+`free_unpacked` still passed `NULL`, so palloc'd memory was handed to the
+default allocator's `free()`. Found by libpg_query's own test suite while
+porting these changes upstream (`test/deparse` aborted in `mfm_free` on the
+first query); pg_query_go does not expose that entry point, so no Go consumer
+could reach it. A sweep of every `__unpack` / `__free_unpacked` pair in `src/`
+found no other mismatch.
+
 ## Maintaining this fork
 
 **`make update_source` erases every change in this document.** The `parser/`

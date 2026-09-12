@@ -184,7 +184,11 @@ pg_query_deparse_comments_for_query(const char *query)
 		prior_token_end = token->end;
 	}
 
-	pg_query__scan_result__free_unpacked(scan_result, NULL);
+	/*
+	 * goosedb fork: must match the allocator used by the unpack above. Freeing
+	 * palloc'd memory with the default allocator's free() corrupts the heap.
+	 */
+	pg_query__scan_result__free_unpacked(scan_result, &pg_query_protobuf_allocator);
 	pg_query_free_scan_result(scan_result_raw);
 
 	return result;
