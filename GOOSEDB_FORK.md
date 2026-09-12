@@ -108,8 +108,59 @@ Control group — large but shallow input must keep working, and does:
 `SELECT true OR true …` ×100000 (800KB, nesting depth 11) and
 `SELECT ((((1))))` ×8000 both still return normally.
 
+## Maintaining this fork
+
+**`make update_source` erases every change in this document.** The `parser/`
+directory is not source that lives here — it is a copy. The target does:
+
+    rm -f parser/*.{c,h}
+    rm -fr parser/include
+    cp -a $(LIBDIR)/src/* parser/          # LIB_PG_QUERY_TAG = 17-6.2.2
+
+So bumping `LIB_PG_QUERY_TAG` silently reverts the guard, and nothing in this
+repository's tests would notice: upstream offers the same API, so everything
+still compiles and passes. The failure only appears as a dead process on deep
+input. After any `update_source`, re-apply the C changes listed above and
+re-run the measurements in the previous section.
+
+The consuming repository defends the same boundary from its side: it forbids
+importing the upstream module path, and it asserts — via `go list -m`, not by
+reading go.mod as text — that `github.com/hellower/pg_query_go/v6` is not
+`replace`d, because a directory `replace` swaps the linked library while every
+import line stays unchanged.
+
 ## Upstreaming
 
-Every change here is a candidate for `pganalyze/libpg_query` /
-`pganalyze/pg_query_go`: the problem is not specific to this caller. Any
-consumer that feeds untrusted SQL to the library can be killed by it.
+Every change here is a candidate for upstream: the problem is not specific to
+this caller. Any consumer that feeds untrusted SQL to the library can be killed
+by it.
+
+**The target is `pganalyze/libpg_query`, not `pganalyze/pg_query_go`.** All the
+C changes live under `parser/`, which is a copy of libpg_query's `src/` (see
+the previous section). Their places in libpg_query at tag `17-6.2.2`:
+
+| this fork | libpg_query |
+|---|---|
+| `parser/pg_query.c`, `pg_query_parse.c`, `pg_query_deparse.c`, `pg_query_outfuncs_protobuf.c`, `pg_query_readfuncs_protobuf.c`, `postgres_deparse.c`, `pg_query_internal.h` | `src/` |
+| `parser/src_backend_tcop_postgres.c` | `src/postgres/` |
+| `parser/protobuf-c.c`, `parser/include/protobuf-c.h`, `parser/include/protobuf-c/protobuf-c.h` | `vendor/protobuf-c/` — itself vendored third-party code |
+
+Two notes for whoever opens that PR:
+
+- Most of the diff is *restoring PostgreSQL's own code* (`set_stack_base()`,
+  `restore_stack_base()`, `assign_max_stack_depth()`) and adding
+  `check_stack_depth()` calls that PostgreSQL itself makes in the equivalent
+  walkers. That part should be uncontroversial.
+- The novel part is deriving the limit from the *running thread's* stack.
+  PostgreSQL can assume the main stack plus a `max_stack_depth` GUC; a library
+  linked into an arbitrary host cannot. If upstream prefers an explicit API
+  (`pg_query_set_max_stack_depth()`), the derivation here can become the
+  default rather than the only behaviour.
+- The protobuf-c changes touch code libpg_query itself vendors, so they are a
+  separate decision: patch the vendored copy, or take it to `protobuf-c`
+  upstream. `protobuf_c_message_unpack` has no recursion limit at all there.
+
+libpg_query issue #9 (2016, closed) has a similar title but is a different bug:
+`_outNode` recursed forever on `CreateForeignTableStmt` because of a struct
+embedding. The class fixed here — unbounded recursion depth on input that is
+deep but otherwise valid — is still open upstream.
