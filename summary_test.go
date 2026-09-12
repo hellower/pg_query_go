@@ -8,7 +8,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pg_query "github.com/pganalyze/pg_query_go/v6"
+	pg_query "github.com/hellower/pg_query_go/v6"
 )
 
 var summaryTests = []struct {

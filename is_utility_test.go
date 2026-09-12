@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	pg_query "github.com/pganalyze/pg_query_go/v6"
-	"github.com/pganalyze/pg_query_go/v6/parser"
+	pg_query "github.com/hellower/pg_query_go/v6"
+	"github.com/hellower/pg_query_go/v6/parser"
 )
 
 var isUtilityStmtTests = []struct {
