@@ -153,101 +153,88 @@ reading go.mod as text — that `github.com/hellower/pg_query_go/v6` is not
 `replace`d, because a directory `replace` swaps the linked library while every
 import line stays unchanged.
 
-## PostgreSQL 18: fingerprint compatibility
+## PostgreSQL 18: fingerprint 호환성
 
-🚨 **Decision (2026-09-13): stay on libpg_query `17-6.2.2` until
-`pganalyze/pg_query_go` tags a release built on libpg_query 18 that includes
-[libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361). When
-moving, every fingerprint must be computed with `PG17_COMPAT`.**
+🚨 **결정(2026-09-13): `pganalyze/pg_query_go` 가 libpg_query 18 기반이면서
+[libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361) 을 포함한 릴리스를
+태그로 낼 때까지 libpg_query `17-6.2.2` 에 머문다. 이관할 때는 모든 fingerprint 를
+`PG17_COMPAT` 으로 계산해야 한다.**
 
-### What changed in libpg_query 18
+### libpg_query 18 에서 무엇이 바뀌었나
 
-libpg_query `18.0.0` (2026-05-20) followed PostgreSQL commit `787514b30bb`
-for query IDs. For relation references in SELECT/DML statements:
+libpg_query `18.0.0`(2026-05-20)은 query ID 에 관한 PostgreSQL 커밋 `787514b30bb` 를
+따랐다. SELECT/DML 문의 테이블 참조에 대해:
 
-| | libpg_query ≤ 17 | libpg_query 18 default |
+| | libpg_query ≤ 17 | libpg_query 18 기본값 |
 |---|---|---|
-| relation name | fingerprinted | dropped when an alias is present |
-| alias | ignored | fingerprinted |
-| schema name | fingerprinted | ignored |
+| 테이블 이름 | 반영 | 별칭이 있으면 빠짐 |
+| 별칭 | 무시 | 반영 |
+| 스키마 이름 | 반영 | 무시 |
 
-libpg_query#361 adds a `fingerprint_options` bitmask as a third argument to
-`pg_query_fingerprint_opts` (an API/ABI break for that function).
-`PG_QUERY_FINGERPRINT_RANGEVAR_PG17_COMPAT` (= `IGNORE_ALIASES |
-INCLUDE_SCHEMA`) restores the ≤ 17 behaviour. **The default stays PostgreSQL
-18's**, and `pg_query_fingerprint()` — the only function this tree's
-`parser/parser.go` calls — is hard-wired to that default.
+libpg_query#361 은 `pg_query_fingerprint_opts` 에 세 번째 인자로 `fingerprint_options`
+비트마스크를 추가한다(그 함수의 API/ABI 변경). `PG_QUERY_FINGERPRINT_RANGEVAR_PG17_COMPAT`
+(= `IGNORE_ALIASES | INCLUDE_SCHEMA`)이 ≤ 17 동작을 되살린다. **기본값은 PostgreSQL 18
+방식 그대로이고**, 이 트리의 `parser/parser.go` 가 부르는 유일한 함수인
+`pg_query_fingerprint()` 는 그 기본값에 고정돼 있다.
 
-### Why this fork cannot simply "switch to PG17_COMPAT" now
+### 왜 지금 "PG17_COMPAT 으로 바꾸기" 를 할 수 없나
 
-The option does not exist in `17-6.2.2`, and on 17 it would be a no-op anyway:
-17 already fingerprints this way. It becomes meaningful only together with the
-move to 18.
+`17-6.2.2` 에는 그 옵션이 없고, 있더라도 17 에서는 아무 효과가 없다 — 17 은 이미 그 방식으로
+계산한다. 18 로의 이관과 함께할 때만 의미가 있다.
 
-### Measured impact on the consumer
+### 쓰는 쪽에 미치는 영향(실측)
 
-The consumer keeps a table of client-compatibility rewrites (DBeaver, pgAdmin,
-pgJDBC, Trino, Grafana, Power BI, Superset, pgbench) keyed on **hard-coded
-fingerprints** — 124 live keys. A miss is not an error: the query takes the
-generic path and the rewrite silently stops. Its tests look handlers up by hex
-literal, so they would stay green.
+이 fork 를 쓰는 쪽은 클라이언트 호환 재작성 테이블(DBeaver, pgAdmin, pgJDBC, Trino, Grafana,
+Power BI, Superset, pgbench)을 **하드코딩된 fingerprint** 로 찾는다 — 활성 키 124개.
+빗나가도 에러가 아니다: 쿼리는 일반 경로로 가고 재작성만 조용히 멈춘다. 그쪽 테스트는
+핸들러를 hex 리터럴로 찾으므로 초록으로 남는다.
 
-Method (darwin/arm64): libpg_query built as a static C library three times —
-`17-6.2.2`, `18.0.0`, and the #361 head (`bbfab39`, on `18-latest`). The SQL
-behind each key was recovered from the handler's comment and the tests, and
-accepted only if `17-6.2.2` reproduces the key exactly. **122 of 124**
-recovered; the other two have comments that do not match the query they were
-keyed on, and are unmeasured.
+방법(darwin/arm64): libpg_query 를 C 정적 라이브러리로 세 벌 빌드했다 — `17-6.2.2`,
+`18.0.0`, #361 head(`bbfab39`, `18-latest` 기반). 각 키 뒤의 SQL 은 핸들러 주석과 테스트에서
+복원했고, `17-6.2.2` 가 키를 정확히 재현할 때만 원문으로 인정했다. **124개 중 122개**
+복원. 나머지 2개는 주석이 실제 키의 쿼리와 맞지 않아 측정하지 못했다.
 
-| fingerprint computed with | unchanged | changed |
+| fingerprint 계산 방식 | 그대로 | 바뀜 |
 |---|---|---|
-| `18.0.0`, default | 17 | **105** |
-| #361, default | 17 | **105** — identical to `18.0.0` on all 122 |
-| #361, `PG17_COMPAT` | **122** | **0** |
+| `18.0.0` 기본값 | 17 | **105** |
+| #361 기본값 | 17 | **105** — 122개 모두 `18.0.0` 과 동일 |
+| #361 `PG17_COMPAT` | **122** | **0** |
 
-The 17 that survive the default are queries with no relation at all, bare
-unqualified tables with no alias, schema-qualified *functions*
-(`pg_catalog.pg_show_all_settings()`), and TRUNCATE. Every schema-qualified or
-aliased catalog query changed.
+기본값에서도 살아남은 17개는 테이블 참조가 아예 없는 쿼리, 스키마·별칭 없는 테이블, 스키마가
+*함수*에 붙은 쿼리(`pg_catalog.pg_show_all_settings()`), 그리고 TRUNCATE 다. 스키마를 붙이거나
+별칭을 쓴 카탈로그 조회는 전부 바뀌었다.
 
-Caveat: recovered SQL is equivalent to the original *under 17's rules*, which
-ignore aliases. If a comment's alias differs from what the client actually
-sends, that key's changed/unchanged classification under the 18 default could
-differ. `PG17_COMPAT` follows 17's rules, so its result does not depend on this.
+주의: 복원한 SQL 은 별칭을 무시하는 *17 규칙 아래에서* 원문과 동치다. 주석의 별칭이 클라이언트가
+실제로 보내는 것과 다르면, 18 기본값에서의 바뀜/그대로 분류는 달라질 수 있다. `PG17_COMPAT` 은
+17 규칙을 따르므로 그 결과는 이 영향을 받지 않는다.
 
-### Upstream status (as of 2026-09-13)
+### upstream 상태 (2026-09-13 기준)
 
-- libpg_query#361: open, approved once, not merged.
-- pg_query_go branch `update-to-18-and-allow-fingerprint-opts` (`e6a9b98`,
-  2026-09-02): two WIP commits, no PR, `LIB_PG_QUERY_TAG = fingerprint-options`
-  — a branch name, not a release tag. It adds `FingerprintOption`,
-  `FingerprintRangeVarPG17Compat`, `FingerprintWithOpts`,
-  `FingerprintToUInt64WithOpts`, `FingerprintToHexStrWithOpts`; the plain
-  functions keep `FingerprintDefault`.
+- libpg_query#361: 열림, 승인 1건, 미머지.
+- pg_query_go 브랜치 `update-to-18-and-allow-fingerprint-opts`(`e6a9b98`, 2026-09-02):
+  WIP 커밋 2개, PR 없음, `LIB_PG_QUERY_TAG = fingerprint-options` — 릴리스 태그가 아니라
+  브랜치 이름이다. `FingerprintOption`, `FingerprintRangeVarPG17Compat`,
+  `FingerprintWithOpts`, `FingerprintToUInt64WithOpts`, `FingerprintToHexStrWithOpts` 를
+  추가하고, 옵션 없는 함수들은 `FingerprintDefault` 를 유지한다.
 
-### Checklist for the move
+### 이관 체크리스트
 
-1. The upstream pg_query_go release is **tagged** and its libpg_query tag
-   contains #361.
-2. **Rebase this fork onto that release tag — not just `make update_source`.**
-   `update_source` refreshes only the copied C sources, the generated protobuf
-   and test data; it never touches the Go wrappers (`pg_query.go`,
-   `parser/parser.go`), so `FingerprintWithOpts` and `FingerprintOption` would
-   still be missing and step 3 would not compile. The release tag carries both
-   halves. On top of it, re-apply:
-   - the module rename, to whatever module path the release declares (the WIP
-     branch still says `…/v6`; if the release moves to a new major, the
-     consumer's import paths change with it);
-   - the stack-depth guard (previous section) — unless libpg_query#366 has
-     landed in that release.
-3. Switch the consumer's fingerprint calls to `FingerprintWithOpts(…,
-   FingerprintRangeVarPG17Compat)`. Prefer this over changing the default in
-   this fork: the API is upstream's, so the fork's Go API stays identical.
-4. Re-run the key comparison on the release itself. #361 promises
-   `PG17_COMPAT` only for relation-reference handling; other fingerprint
-   changes on the 18 line — PostgreSQL 18 parse-tree changes, or libpg_query's
-   own (e.g. libpg_query#358: TransactionStmt options now affect `BEGIN` /
-   `START TRANSACTION`) — can still move keys.
+1. upstream pg_query_go 릴리스가 **태그로** 나왔고, 그 libpg_query 태그가 #361 을 포함한다.
+2. **이 fork 를 그 릴리스 태그로 rebase 한다 — `make update_source` 만으로는 안 된다.**
+   `update_source` 는 복사된 C 소스·생성된 protobuf·테스트 데이터만 새로 고치고 Go
+   래퍼(`pg_query.go`, `parser/parser.go`)는 건드리지 않는다. 그러면 `FingerprintWithOpts`
+   와 `FingerprintOption` 이 여전히 없어 3단계가 컴파일되지 않는다. 릴리스 태그에는 두 쪽이
+   다 들어 있다. 그 위에 다시 적용할 것:
+   - 모듈 경로 변경 — 릴리스가 선언하는 모듈 경로로(WIP 브랜치는 아직 `…/v6`. 릴리스가 새
+     메이저로 가면 쓰는 쪽의 import 경로도 함께 바뀐다);
+   - 스택 깊이 가드(앞 절) — 그 릴리스에 libpg_query#366 이 들어가지 않았다면.
+3. 쓰는 쪽의 fingerprint 호출을 `FingerprintWithOpts(…, FingerprintRangeVarPG17Compat)` 로
+   바꾼다. 이 fork 의 기본값을 바꾸는 것보다 이쪽을 택한다: upstream 의 API 라서 fork 의 Go
+   API 가 동일하게 유지된다.
+4. 릴리스 자체로 키 대조를 다시 돌린다. #361 이 `PG17_COMPAT` 으로 보장하는 것은 테이블 참조
+   처리뿐이다. 18 계열의 다른 fingerprint 변경 — PostgreSQL 18 파스 트리 변경이나
+   libpg_query 자체의 변경(예: libpg_query#358: TransactionStmt 옵션이 이제 `BEGIN` /
+   `START TRANSACTION` 에 반영된다) — 은 여전히 키를 움직일 수 있다.
 
 ## Upstreaming
 

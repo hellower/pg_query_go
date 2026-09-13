@@ -24,51 +24,44 @@ Licenses are unchanged and unmodified. The canonical record — rationale, full
 change list, measurements, maintenance notes — is [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md);
 this section summarises it.
 
-## 🚨 PostgreSQL 18: wait for upstream's release — then fingerprint with `PG17_COMPAT`
+## 🚨 PostgreSQL 18: upstream 릴리스까지 대기 — 이관 시 `PG17_COMPAT` 로 fingerprint
 
-> **Decision (2026-09-13): this fork stays on libpg_query `17-6.2.2` until
-> `pganalyze/pg_query_go` publishes a tagged release built on libpg_query 18
-> that includes [libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361).**
-> Do not rebase onto an unreleased 18 branch.
+> **결정(2026-09-13): 이 fork 는 `pganalyze/pg_query_go` 가 libpg_query 18 기반이면서
+> [libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361) 을 포함한
+> 릴리스를 태그로 낼 때까지 libpg_query `17-6.2.2` 에 머문다.**
+> 릴리스되지 않은 18 브랜치로 rebase 하지 않는다.
 
-**Why it matters: libpg_query 18 changed what a fingerprint means, and the
-breakage is silent.** Following PostgreSQL 18's query ID change, relation
-references in SELECT/DML are now fingerprinted by **alias** (the relation name
-is dropped when an alias exists) and **schema names are ignored**. The
-consumer keys a table of client-compatibility rewrites on hard-coded
-fingerprints of catalog queries — nearly all of the form
-`FROM pg_catalog.pg_class c`. Measured against those keys:
+**왜 중요한가: libpg_query 18 에서 fingerprint 의 의미가 바뀌었고, 깨져도 조용하다.**
+PostgreSQL 18 의 query ID 변경을 따라, SELECT/DML 의 테이블 참조는 이제 **별칭**으로
+계산되고(별칭이 있으면 테이블 이름은 빠진다) **스키마 이름은 무시된다.** 이 fork 를 쓰는
+쪽은 클라이언트 호환 재작성 테이블을 카탈로그 조회의 **하드코딩된 fingerprint** 로 찾는데,
+그 조회는 거의 전부 `FROM pg_catalog.pg_class c` 형태다. 그 키들로 실측한 결과:
 
-| fingerprint computed with | keys unchanged | keys changed |
+| fingerprint 계산 방식 | 키 그대로 | 키 바뀜 |
 |---|---|---|
-| libpg_query `18.0.0`, default | 17 | **105** |
-| libpg_query#361, default (identical to `18.0.0` on every key) | 17 | **105** |
-| libpg_query#361, **`PG17_COMPAT`** | **122** | **0** |
+| libpg_query `18.0.0` 기본값 | 17 | **105** |
+| libpg_query#361 기본값 (모든 키에서 `18.0.0` 과 동일) | 17 | **105** |
+| libpg_query#361 **`PG17_COMPAT`** | **122** | **0** |
 
-A changed key is not an error: the lookup misses, the query falls through to
-the generic path, and the rewrite simply stops happening. Tests that look keys
-up by their hex literal stay green.
+키가 바뀌어도 에러가 나지 않는다. 조회가 빗나가 일반 경로로 흘러가고, 재작성만 조용히
+사라진다. 키를 hex 리터럴로 직접 찾는 테스트는 초록으로 남는다.
 
-**When upstream releases 18:**
+**upstream 이 18 을 릴리스하면:**
 
-- 🚨 **Every fingerprint call must pass `FingerprintRangeVarPG17Compat`.** The
-  plain `Fingerprint` / `FingerprintToUInt64` / `FingerprintToHexStr` keep the
-  PostgreSQL 18 default even after #361 — the option only exists on the
-  `…WithOpts` variants.
-- Prefer switching the **consumer** to upstream's `FingerprintWithOpts` over
-  changing the default here: that API is upstream's own, so this fork's Go API
-  stays identical to upstream's.
-- `PG17_COMPAT` is only promised for relation-reference handling. Re-run the
-  key comparison on the release itself before switching — other fingerprint
-  changes on the 18 line are not covered by that promise.
-- The upgrade is a **rebase onto the release tag**, not a `make update_source`:
-  that target refreshes only the copied C sources, protobuf and test data, and
-  never touches the Go wrappers (`pg_query.go`, `parser/parser.go`), so the
-  `…WithOpts` API would still be missing. After the rebase, re-apply the module
-  rename (to the release's module path, which may be a new major) and the
-  stack-depth guard — see [Maintaining this fork](#maintaining-this-fork).
+- 🚨 **모든 fingerprint 호출에 `FingerprintRangeVarPG17Compat` 을 넘겨야 한다.** 옵션 없는
+  `Fingerprint` / `FingerprintToUInt64` / `FingerprintToHexStr` 는 #361 이후에도
+  PostgreSQL 18 기본값이다 — 옵션은 `…WithOpts` 변형에만 있다.
+- 이 fork 의 기본값을 바꾸기보다 **쓰는 쪽**을 upstream 의 `FingerprintWithOpts` 로 바꾸는
+  편을 택한다. upstream 자신의 API 이므로 이 fork 의 Go API 가 upstream 과 동일하게 유지된다.
+- `PG17_COMPAT` 이 보장하는 것은 테이블 참조 처리뿐이다. 전환 전에 릴리스 자체로 키 대조를
+  다시 돌린다 — 18 계열의 다른 fingerprint 변경은 그 보장 밖이다.
+- 이관은 `make update_source` 가 아니라 **릴리스 태그로의 rebase** 다. 그 타깃은 복사된
+  C 소스·protobuf·테스트 데이터만 새로 고치고 Go 래퍼(`pg_query.go`, `parser/parser.go`)는
+  건드리지 않으므로 `…WithOpts` API 가 여전히 없다. rebase 후 모듈 경로 변경(릴리스의 모듈
+  경로로 — 새 메이저일 수 있다)과 스택 깊이 가드를 다시 적용한다 —
+  [Maintaining this fork](#maintaining-this-fork) 참조.
 
-Status and method: [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md#postgresql-18-fingerprint-compatibility).
+상태와 측정 방법: [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md#postgresql-18-fingerprint-호환성).
 
 ## Why this fork exists
 
