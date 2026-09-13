@@ -153,6 +153,93 @@ reading go.mod as text — that `github.com/hellower/pg_query_go/v6` is not
 `replace`d, because a directory `replace` swaps the linked library while every
 import line stays unchanged.
 
+## PostgreSQL 18: fingerprint compatibility
+
+🚨 **Decision (2026-09-13): stay on libpg_query `17-6.2.2` until
+`pganalyze/pg_query_go` tags a release built on libpg_query 18 that includes
+[libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361). When
+moving, every fingerprint must be computed with `PG17_COMPAT`.**
+
+### What changed in libpg_query 18
+
+libpg_query `18.0.0` (2026-05-20) followed PostgreSQL commit `787514b30bb`
+for query IDs. For relation references in SELECT/DML statements:
+
+| | libpg_query ≤ 17 | libpg_query 18 default |
+|---|---|---|
+| relation name | fingerprinted | dropped when an alias is present |
+| alias | ignored | fingerprinted |
+| schema name | fingerprinted | ignored |
+
+libpg_query#361 adds a `fingerprint_options` bitmask as a third argument to
+`pg_query_fingerprint_opts` (an API/ABI break for that function).
+`PG_QUERY_FINGERPRINT_RANGEVAR_PG17_COMPAT` (= `IGNORE_ALIASES |
+INCLUDE_SCHEMA`) restores the ≤ 17 behaviour. **The default stays PostgreSQL
+18's**, and `pg_query_fingerprint()` — the only function this tree's
+`parser/parser.go` calls — is hard-wired to that default.
+
+### Why this fork cannot simply "switch to PG17_COMPAT" now
+
+The option does not exist in `17-6.2.2`, and on 17 it would be a no-op anyway:
+17 already fingerprints this way. It becomes meaningful only together with the
+move to 18.
+
+### Measured impact on the consumer
+
+The consumer keeps a table of client-compatibility rewrites (DBeaver, pgAdmin,
+pgJDBC, Trino, Grafana, Power BI, Superset, pgbench) keyed on **hard-coded
+fingerprints** — 124 live keys. A miss is not an error: the query takes the
+generic path and the rewrite silently stops. Its tests look handlers up by hex
+literal, so they would stay green.
+
+Method (darwin/arm64): libpg_query built as a static C library three times —
+`17-6.2.2`, `18.0.0`, and the #361 head (`bbfab39`, on `18-latest`). The SQL
+behind each key was recovered from the handler's comment and the tests, and
+accepted only if `17-6.2.2` reproduces the key exactly. **122 of 124**
+recovered; the other two have comments that do not match the query they were
+keyed on, and are unmeasured.
+
+| fingerprint computed with | unchanged | changed |
+|---|---|---|
+| `18.0.0`, default | 17 | **105** |
+| #361, default | 17 | **105** — identical to `18.0.0` on all 122 |
+| #361, `PG17_COMPAT` | **122** | **0** |
+
+The 17 that survive the default are queries with no relation at all, bare
+unqualified tables with no alias, schema-qualified *functions*
+(`pg_catalog.pg_show_all_settings()`), and TRUNCATE. Every schema-qualified or
+aliased catalog query changed.
+
+Caveat: recovered SQL is equivalent to the original *under 17's rules*, which
+ignore aliases. If a comment's alias differs from what the client actually
+sends, that key's changed/unchanged classification under the 18 default could
+differ. `PG17_COMPAT` follows 17's rules, so its result does not depend on this.
+
+### Upstream status (as of 2026-09-13)
+
+- libpg_query#361: open, approved once, not merged.
+- pg_query_go branch `update-to-18-and-allow-fingerprint-opts` (`e6a9b98`,
+  2026-09-02): two WIP commits, no PR, `LIB_PG_QUERY_TAG = fingerprint-options`
+  — a branch name, not a release tag. It adds `FingerprintOption`,
+  `FingerprintRangeVarPG17Compat`, `FingerprintWithOpts`,
+  `FingerprintToUInt64WithOpts`, `FingerprintToHexStrWithOpts`; the plain
+  functions keep `FingerprintDefault`.
+
+### Checklist for the move
+
+1. The upstream pg_query_go release is **tagged** and its libpg_query tag
+   contains #361.
+2. Redo `make update_source` against it and **re-apply the stack-depth guard**
+   (previous section) — unless libpg_query#366 has landed in that release.
+3. Switch the consumer's fingerprint calls to `FingerprintWithOpts(…,
+   FingerprintRangeVarPG17Compat)`. Prefer this over changing the default in
+   this fork: the API is upstream's, so the fork's Go API stays identical.
+4. Re-run the key comparison on the release itself. #361 promises
+   `PG17_COMPAT` only for relation-reference handling; other fingerprint
+   changes on the 18 line — PostgreSQL 18 parse-tree changes, or libpg_query's
+   own (e.g. libpg_query#358: TransactionStmt options now affect `BEGIN` /
+   `START TRANSACTION`) — can still move keys.
+
 ## Upstreaming
 
 Every change here is a candidate for upstream: the problem is not specific to
