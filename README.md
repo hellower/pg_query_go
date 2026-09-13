@@ -1,3 +1,161 @@
+# ⚠️ This is a fork
+
+**`github.com/hellower/pg_query_go`** — a fork of
+[`pganalyze/pg_query_go`](https://github.com/pganalyze/pg_query_go) that makes the
+parser **return an error instead of killing the process** on deeply nested SQL.
+Everything else is upstream's.
+
+```
+go get github.com/hellower/pg_query_go/v6@v6.2.2-goosedb.3
+```
+
+```go
+import pg_query "github.com/hellower/pg_query_go/v6"
+```
+
+> 🚨 **Upstream's README follows this section unedited — including the
+> `github.com/pganalyze/...` import paths in its examples.** Substitute the path
+> above when reading them. The body is deliberately left untouched: the diff
+> against upstream is the only thing that tells a reader how much of this fork is
+> actually ours, and rewriting import lines in prose would bury that.
+
+Fork point: upstream tag **v6.2.2** (`6a1adb4`). Branch: `stack-depth-guard`.
+Licenses are unchanged and unmodified. The canonical record — rationale, full
+change list, measurements, maintenance notes — is [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md);
+this section summarises it.
+
+## Why this fork exists
+
+Deeply nested but otherwise valid SQL made libpg_query recurse until the OS
+thread stack ran out, and the process died with SIGSEGV/SIGBUS instead of
+returning an error. From Go that is unrecoverable: the signal arrives during a
+cgo call, so `recover()` never sees it. One statement could take a server down.
+
+Two independent defects combined to cause it.
+
+**1. PostgreSQL's stack-depth guard is shipped but disabled.**
+`check_stack_depth()`, `stack_is_too_deep()` and `max_stack_depth` are all
+present, but the body of `set_stack_base()` — which sets the `stack_base_ptr`
+that `stack_is_too_deep()` tests — had been stripped, so it stayed NULL forever
+and the check was dead code. `assign_max_stack_depth()` was stripped the same
+way, pinning the limit to the 100kB compile-time default.
+
+**2. libpg_query's own recursive walkers never call the guard.** Every walker
+inherited from PostgreSQL calls `check_stack_depth()` (copyfuncs.c, nodeFuncs.c,
+equalfuncs.c). The walkers libpg_query adds — the protobuf serializer, the JSON
+serializer, the protobuf reader, the deparser — did not, and neither did the
+vendored protobuf-c runtime. Fixing (1) alone changes almost nothing; (2) is the
+substance.
+
+## What differs from upstream — complete list
+
+Only `parser/` (the C sources) and the module path differ. **No Go API is added,
+removed or changed.**
+
+| file | change |
+|---|---|
+| `parser/src_backend_tcop_postgres.c` | Restored `set_stack_base()`, `restore_stack_base()` and `assign_max_stack_depth()` bodies, verbatim from PostgreSQL. |
+| `parser/pg_query.c` | Added `pg_query_arm_stack_guard()`, called from `pg_query_enter_memory_context()` — the chokepoint every entry point already goes through, so none of the nine entry points changed. The limit is derived from the **running thread's** stack (macOS `pthread_get_stacksize_np`, glibc `pthread_getattr_np` + `pthread_attr_getstack`): half the stack, clamped to `[64kB, 1MB]`, conservative fallback otherwise. Also defines the palloc-backed `pg_query_protobuf_allocator`. |
+| `parser/pg_query_internal.h` | Declares that allocator. |
+| `parser/pg_query_outfuncs_protobuf.c` | `check_stack_depth()` in `_outNode`. |
+| `parser/pg_query_outfuncs_json.c` | `check_stack_depth()` in `_outNode`. |
+| `parser/pg_query_readfuncs_protobuf.c` | `check_stack_depth()` in `_readNode`; unpack uses the palloc allocator; the unpack-failure `Assert` became an `ERRCODE_STATEMENT_TOO_COMPLEX` ereport so release builds return an error too; `free_unpacked()` gets the same allocator. |
+| `parser/postgres_deparse.c` | `check_stack_depth()` in `deparseExpr` and `deparseStmt`. |
+| `parser/pg_query_parse.c` | Serialization wrapped in its own `PG_TRY` — both the JSON and the protobuf entry point. `pg_query_raw_parse()` has one, but it ends *before* serialization, so an `ereport(ERROR)` raised while walking the tree had no exception stack and PostgreSQL escalated it to **FATAL**: the process exited instead of returning an error. That became reachable the moment the walkers started calling the guard. |
+| `parser/pg_query_deparse.c` | Same `PG_TRY` / allocator treatment for the scan-result unpack. |
+| `parser/protobuf-c.c` | `check_stack_depth()` plus a nesting counter (`PROTOBUF_C_MAX_UNPACK_NESTING`, 10000) on unpack — that path uses ~1kB of C stack per level, so a count-only limit is not enough. The check is in `get_packed_size`, not `pack`, because the former runs *before* the malloc, so a longjmp there leaks nothing. |
+| `parser/include/protobuf-c.h`, `parser/include/protobuf-c/protobuf-c.h` | The counter's declaration. (Two copies exist in this tree; `-Iinclude` picks the first, so both are patched.) |
+| `go.mod`, `pg_query.go`, `parser/build_cgo.go`, and seven `*_test.go` files | Module renamed to `github.com/hellower/pg_query_go/v6` — the `go.mod` line, the blank imports that pull `parser/include/**` into `go mod vendor`, and the import paths in the tests. **Fork-only, never upstreamable.** |
+| `GOOSEDB_FORK.md`, `README.md` | This fork's record. `README.md` carries only this prepended section; upstream's body below it is untouched. |
+
+## Measured effect (darwin/arm64, subprocess-isolated)
+
+`SELECT 1+1+…` is the cheapest shape per byte. Same binary otherwise:
+
+| input | upstream v6.2.2 | this fork |
+|---|---|---|
+| 6KB (`chain` 3000) | SIGBUS in deparse | `stack depth limit exceeded` |
+| 48KB (`chain` 24000) | SIGSEGV in protobuf-c pack | `stack depth limit exceeded` |
+| 128KB (`chain` 64000) | FATAL, process exits | `stack depth limit exceeded` |
+| 500KB (`chain` 250000) | SIGSEGV | `stack depth limit exceeded` |
+
+Both output paths are covered — `pg_query_parse` (JSON) and
+`pg_query_parse_protobuf` behave identically.
+
+**Large but shallow input keeps working**, which is the point of bounding depth
+rather than length: `SELECT true OR true …` ×100000 (800KB, nesting depth 11) and
+`SELECT ((((1))))` ×8000 both still parse normally.
+
+## Tags
+
+| tag | change |
+|---|---|
+| `v6.2.2-goosedb.1` | Initial: guard armed, `check_stack_depth()` in the recursive walkers and protobuf-c. |
+| `v6.2.2-goosedb.2` | Allocator mismatch in `pg_query_deparse_comments_for_query` — the unpack had been switched to the palloc allocator but the matching `free_unpacked()` still passed `NULL`, handing palloc'd memory to the default allocator's `free()`. Found by libpg_query's own test suite while porting upstream. |
+| `v6.2.2-goosedb.3` | The JSON output path was still unguarded — only the protobuf serializer had the check, and only the protobuf entry point had its own `PG_TRY`. |
+
+## Upstream contribution — pganalyze/libpg_query#366
+
+**All C changes here have been submitted upstream.** The problem is not specific
+to this caller: any consumer that feeds untrusted SQL to the library can be
+killed by it.
+
+**PR: [pganalyze/libpg_query#366](https://github.com/pganalyze/libpg_query/pull/366)**
+— *"Guard libpg_query's own recursive walkers against stack exhaustion"*
+
+- **The target repository is `libpg_query`, not `pg_query_go`.** Everything under
+  `parser/` here is a *copy*: `make update_source` deletes it and re-copies from
+  `libpg_query-$(LIB_PG_QUERY_TAG)/src/`. The C fix has no home in this
+  repository.
+- **Target branch is `18-latest`** (upstream's default), whereas this fork is
+  based on `17-6.2.2`. Ten of the eleven files applied cleanly across that gap.
+  The eleventh moved: PostgreSQL 18 split the stack machinery out of
+  `src_backend_tcop_postgres.c` into
+  `src/postgres/src_backend_utils_misc_stack_depth.c`, and it was re-applied
+  there by hand.
+- **Both defects were re-confirmed on `18-latest` before submitting** — not
+  assumed. `check_stack_depth()` call sites were counted in the pristine tree
+  (1 each in the three walkers inherited from PostgreSQL, **0** in all five of
+  libpg_query's own and vendored ones), `set_stack_base()` was verified to still
+  be an empty `#ifdef` shell, and the SIGSEGV was reproduced.
+- **Not submitted:** the module rename and `GOOSEDB_FORK.md` — fork-only.
+- **Verification in that PR:** `make build` clean, `make test` passing unchanged
+  (8 / 414 / 14 assertions across the suites), and a before/after reproducer
+  showing 128KB and 500KB inputs going from SIGSEGV to
+  `stack depth limit exceeded`.
+- **Two points left open for the maintainers**, both flagged in the PR body:
+  deriving the limit from the thread's stack could instead become the default
+  behind an explicit `pg_query_set_max_stack_depth()` API; and the protobuf-c
+  changes touch vendored third-party code, so they may belong in a patch file or
+  in protobuf-c upstream rather than in the vendored copy.
+- Upstream issue [#9](https://github.com/pganalyze/libpg_query/issues/9) (2016,
+  closed) has a similar title but is a **different** bug — `_outNode` recursing
+  forever on `CreateForeignTableStmt` because of a struct embedding. The class
+  fixed here is unbounded depth on input that is deep but otherwise valid.
+- There is no `SECURITY.md` or private reporting channel on the upstream
+  repository, so this was reported together with its fix rather than separately.
+
+**If that PR is merged, this fork should be retired** in favour of the upstream
+release that carries it.
+
+## Maintaining this fork
+
+🚨 **`make update_source` erases every change listed above.** `parser/` is a
+copy, and that target runs `rm -f parser/*.{c,h}` before re-copying from
+libpg_query. Bumping `LIB_PG_QUERY_TAG` silently reverts the guard, and nothing
+in the test suite notices — upstream offers the same API, so everything still
+compiles and passes. The failure only reappears as a dead process on deep input.
+After any `update_source`, re-apply the C changes and re-run the measurements
+above.
+
+The consuming repository defends the same boundary from its side: it forbids
+importing the upstream module path, and it asserts — via `go list -m`, not by
+reading `go.mod` as text — that this module is not `replace`d, because a
+directory `replace` swaps the linked library while every import line stays
+unchanged.
+
+---
+
 # pg_query_go [![GoDoc](https://godoc.org/github.com/pganalyze/pg_query_go/v6?status.svg)](https://godoc.org/github.com/pganalyze/pg_query_go/v6)
 
 Go version of https://github.com/pganalyze/pg_query
