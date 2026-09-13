@@ -61,8 +61,12 @@ up by their hex literal stay green.
 - `PG17_COMPAT` is only promised for relation-reference handling. Re-run the
   key comparison on the release itself before switching — other fingerprint
   changes on the 18 line are not covered by that promise.
-- The upgrade is a `make update_source`, which erases the stack-depth guard —
-  see [Maintaining this fork](#maintaining-this-fork).
+- The upgrade is a **rebase onto the release tag**, not a `make update_source`:
+  that target refreshes only the copied C sources, protobuf and test data, and
+  never touches the Go wrappers (`pg_query.go`, `parser/parser.go`), so the
+  `…WithOpts` API would still be missing. After the rebase, re-apply the module
+  rename (to the release's module path, which may be a new major) and the
+  stack-depth guard — see [Maintaining this fork](#maintaining-this-fork).
 
 Status and method: [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md#postgresql-18-fingerprint-compatibility).
 

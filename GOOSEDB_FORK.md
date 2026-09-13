@@ -229,8 +229,17 @@ differ. `PG17_COMPAT` follows 17's rules, so its result does not depend on this.
 
 1. The upstream pg_query_go release is **tagged** and its libpg_query tag
    contains #361.
-2. Redo `make update_source` against it and **re-apply the stack-depth guard**
-   (previous section) — unless libpg_query#366 has landed in that release.
+2. **Rebase this fork onto that release tag — not just `make update_source`.**
+   `update_source` refreshes only the copied C sources, the generated protobuf
+   and test data; it never touches the Go wrappers (`pg_query.go`,
+   `parser/parser.go`), so `FingerprintWithOpts` and `FingerprintOption` would
+   still be missing and step 3 would not compile. The release tag carries both
+   halves. On top of it, re-apply:
+   - the module rename, to whatever module path the release declares (the WIP
+     branch still says `…/v6`; if the release moves to a new major, the
+     consumer's import paths change with it);
+   - the stack-depth guard (previous section) — unless libpg_query#366 has
+     landed in that release.
 3. Switch the consumer's fingerprint calls to `FingerprintWithOpts(…,
    FingerprintRangeVarPG17Compat)`. Prefer this over changing the default in
    this fork: the API is upstream's, so the fork's Go API stays identical.
