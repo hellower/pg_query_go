@@ -24,6 +24,52 @@ Licenses are unchanged and unmodified. The canonical record — rationale, full
 change list, measurements, maintenance notes — is [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md);
 this section summarises it.
 
+## 🚨 PostgreSQL 18: wait for upstream's release — then fingerprint with `PG17_COMPAT`
+
+> **Decision (2026-09-13): this fork stays on libpg_query `17-6.2.2` until
+> `pganalyze/pg_query_go` publishes a tagged release built on libpg_query 18
+> that includes [libpg_query#361](https://github.com/pganalyze/libpg_query/pull/361).**
+> Do not rebase onto an unreleased 18 branch.
+
+**Why it matters: libpg_query 18 changed what a fingerprint means, and the
+breakage is silent.** Following PostgreSQL 18's query ID change, relation
+references in SELECT/DML are now fingerprinted by **alias** (the relation name
+is dropped when an alias exists) and **schema names are ignored**. The
+consumer keys a table of client-compatibility rewrites on hard-coded
+fingerprints of catalog queries — nearly all of the form
+`FROM pg_catalog.pg_class c`. Measured against those keys:
+
+| fingerprint computed with | keys unchanged | keys changed |
+|---|---|---|
+| libpg_query `18.0.0`, default | 17 | **105** |
+| libpg_query#361, default (identical to `18.0.0` on every key) | 17 | **105** |
+| libpg_query#361, **`PG17_COMPAT`** | **122** | **0** |
+
+A changed key is not an error: the lookup misses, the query falls through to
+the generic path, and the rewrite simply stops happening. Tests that look keys
+up by their hex literal stay green.
+
+**When upstream releases 18:**
+
+- 🚨 **Every fingerprint call must pass `FingerprintRangeVarPG17Compat`.** The
+  plain `Fingerprint` / `FingerprintToUInt64` / `FingerprintToHexStr` keep the
+  PostgreSQL 18 default even after #361 — the option only exists on the
+  `…WithOpts` variants.
+- Prefer switching the **consumer** to upstream's `FingerprintWithOpts` over
+  changing the default here: that API is upstream's own, so this fork's Go API
+  stays identical to upstream's.
+- `PG17_COMPAT` is only promised for relation-reference handling. Re-run the
+  key comparison on the release itself before switching — other fingerprint
+  changes on the 18 line are not covered by that promise.
+- The upgrade is a **rebase onto the release tag**, not a `make update_source`:
+  that target refreshes only the copied C sources, protobuf and test data, and
+  never touches the Go wrappers (`pg_query.go`, `parser/parser.go`), so the
+  `…WithOpts` API would still be missing. After the rebase, re-apply the module
+  rename (to the release's module path, which may be a new major) and the
+  stack-depth guard — see [Maintaining this fork](#maintaining-this-fork).
+
+Status and method: [`GOOSEDB_FORK.md`](GOOSEDB_FORK.md#postgresql-18-fingerprint-compatibility).
+
 ## Why this fork exists
 
 Deeply nested but otherwise valid SQL made libpg_query recurse until the OS
