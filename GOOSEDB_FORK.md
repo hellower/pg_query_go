@@ -70,9 +70,16 @@ it is the single most expensive walker here.
   counter (`PROTOBUF_C_MAX_UNPACK_NESTING`, 10000 — the same default
   protobuf-go uses). These are not redundant: the stack check is the one that
   matters for libpg_query, but it raises through PostgreSQL's error machinery,
-  which is only safe for callers whose allocations unwind with it. The counter's
-  NULL return remains the safe rejection for a caller that passes its own
-  malloc-backed allocator, which protobuf-c's public API allows.
+  which is only safe for callers whose allocations unwind with it — every unpack
+  call in this tree passes the palloc allocator. The counter is an absolute
+  ceiling that does not depend on the thread's stack size.
+  ⚠️ This paragraph used to say the counter's NULL return is the safe rejection
+  for a caller with a malloc-backed allocator. That cannot hold: the wrapper
+  calls `check_stack_depth()` first, so such a caller is longjmp'ed out before
+  the counter is consulted. The same wrong justification is still in the code
+  comments of `parser/protobuf-c.c` (the counter definition and the wrapper);
+  they were deliberately left as they are — see
+  [libpg_query#366 과의 차이](#libpg_query366-과의-차이--의도적으로-옮기지-않은-것).
 * `protobuf_c_message_get_packed_size` gets the guard, and `pack` deliberately
   does not. libpg_query always calls `get_packed_size()` first, then `malloc()`s
   the output buffer, then calls `pack()`. Raising from `get_packed_size()`
@@ -195,6 +202,31 @@ flush-everything catch but was left alone on purpose: it looks only for
 top-level `CREATE FUNCTION`/`DO` statements, which cannot sit below expression
 depth, so a truncated walk cannot change its result; and its caller has no
 `PG_TRY` of its own, so re-throwing there would turn the error into FATAL.
+
+## libpg_query#366 과의 차이 — 의도적으로 옮기지 않은 것
+
+**결정(2026-09-15): 이 fork 의 코드는 쓰는 쪽이 실제로 빌드하는 형상 — darwin/arm64 와
+linux/amd64 glibc(manylinux_2_28), cgo — 에 필요한 것만 담는다.** upstream PR
+[libpg_query#366](https://github.com/pganalyze/libpg_query/pull/366) 은 upstream CI 매트릭스
+(MSVC·MSYS2·clang·valgrind·protobuf C++)와 musl 을 통과시키느라 이 fork 에 없는 수정을 더
+들고 있다. 아래는 그 차이의 전수이고, **옮기지 않은 것은 코드가 아니라 이 표로 관리한다.**
+
+| #366 커밋 | 내용 | 이 fork 상태 | 이 fork 에서 문제가 되지 않는 이유 | 다시 볼 때 |
+|---|---|---|---|---|
+| `552dfe8` | normalize 워커 3종(부분 정규화 성공 반환·`UNION` 직접 재귀·`PG_TRY` 안 `return`) | ✅ 반영 (`v6.2.2-goosedb.5`) | — | — |
+| `b650b51` | `_GNU_SOURCE` (clang·GCC 14 의 `pthread_getattr_np` 암묵 선언) | ✅ 반영 (`v6.2.2-goosedb.4`, 같은 방식) | — | — |
+| `b650b51` | `protobuf-c.h` 에서 `PROTOBUF_C__API` 가 `protobuf_c_message_unpack()` 이 아니라 카운터 선언에 붙는 위치 오류 | ❌ 그대로 (`parser/include/protobuf-c.h`·`parser/include/protobuf-c/protobuf-c.h` 두 사본) | 그 매크로는 `_WIN32` 이면서 `PROTOBUF_C_USE_SHARED_LIB` 일 때만 값이 있고, 그 밖에는 빈 문자열이다 | Windows 에서 protobuf-c 를 공유 라이브러리로 빌드할 때 |
+| `b650b51` | `parser/pg_query.c` 의 `<pthread.h>` 무조건 include | ❌ 그대로 | 깨지는 것은 `pthread.h` 가 없는 MSVC 뿐이다. cgo 는 MSVC 를 쓰지 않고, Windows 의 MinGW 에는 winpthreads 가 있다 | MSVC 로 빌드할 때 |
+| `b650b51` | Windows 에서 `GetCurrentThreadStackLimits()` 로 스택 크기 판별 | ❌ 없음 — 2MB fallback | 쓰는 쪽은 Windows 로 빌드하지 않는다. ⚠️ Windows 의 기본 스레드 스택은 실행 파일 헤더가 정하는데, MSVC 링커 기본값은 1MB 다. 그보다 작은 스택에서는 2MB 상한이 넘치기 전에 걸리지 않는다. Go 로 Windows 에서 쓸 때의 실제 거동은 **재지 않았다** | Windows 빌드를 시작하기 전에 |
+| `b650b51` | Linux 판별을 glibc 에서 Linux 전반으로 넓히고, 메인 스레드는 `RLIMIT_STACK` | ❌ 없음 — `__GLIBC__` 일 때만 판별, 그 밖에는 2MB fallback | 쓰는 쪽은 glibc 로만 빌드한다. ⚠️ musl(Alpine 3.20, C 로 실측)의 기본 스레드 스택은 약 130kB 이고, 메인 스레드에서 `pthread_getattr_np()` 는 지금까지 매핑된 132kB 만 돌려준다. musl 에서 Go 로 쓸 때의 거동은 **재지 않았다** | Alpine/musl 빌드를 시작하기 전에 |
+| `a72c8ff` | `pg_query_summary()` 에서 워크가 오류를 던지면 파서의 stderr 버퍼 누수 | ❌ 그대로 | 쓰는 쪽은 `Summary` 를 호출하지 않는다(0건). 거부된 호출 1건당 malloc 1건이 샌다(upstream 테스트에서 valgrind 실측: 2블록 2바이트) | `Summary` 를 쓰기 시작할 때 |
+| `b650b51` | `protobuf-c.c` 의 카운터 주석 모순("malloc 할당자 호출자에게 NULL 반환이 안전") 정정 | ❌ 코드 주석 그대로 (정의부·wrapper) — 이 문서의 protobuf-c 절은 정정함 | 주석만의 문제다. 동작은 upstream 과 같다 | 그 주석을 근거로 판단하려 할 때 |
+| `b650b51` | MSVC 에서 `__thread` 매핑 | 해당 없음 | cgo 는 MSVC 를 쓰지 않는다 | — |
+| `a72c8ff` | protobuf C++ 직렬화기(`USE_PROTOBUF_CPP`) 가드 | 해당 없음 | 그 파일이 이 트리에 없다 | — |
+| `0d59e7b` | C 회귀 테스트 `test/stack_depth` | 해당 없음 | 이 트리에는 C 테스트 체계가 없다. Go 회귀 테스트는 `normalize_stack_depth_test.go` 하나뿐이다 | — |
+
+**#366 이 들어간 upstream 릴리스로 옮기면 위 ❌ 항목은 전부 저절로 해결된다.** 그 전에
+Windows·musl·`Summary` 중 하나라도 쓰기 시작하면, 이 표의 해당 행을 먼저 옮긴다.
 
 ## Maintaining this fork
 

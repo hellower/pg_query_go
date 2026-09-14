@@ -191,6 +191,24 @@ rather than length: `SELECT true OR true …` ×100000 (800KB, nesting depth 11)
 | `v6.2.2-goosedb.4` | `parser/pg_query.c` did not compile with GCC 14 on glibc: `pthread_getattr_np()` needs `_GNU_SOURCE`, which nothing defined. |
 | `v6.2.2-goosedb.5` | `Normalize` returned a partially normalized query as success on deep input (the walker's catch-all flushed the stack-depth error), a long `UNION` chain still killed the process, and an error after a completed sibling clause longjmp'ed into a dead frame. Found while validating libpg_query#366; ported from its commit `552dfe8`. |
 
+## libpg_query#366 과의 차이 — 의도적으로 옮기지 않은 것
+
+**결정(2026-09-15): 이 fork 의 코드는 쓰는 쪽이 빌드하는 형상(darwin/arm64·linux/amd64 glibc,
+cgo)에 필요한 것만 담는다.** upstream PR #366 이 CI 매트릭스와 musl 을 통과시키려 더한 수정 중
+normalize 수정과 `_GNU_SOURCE` 는 반영했고, 나머지는 옮기지 않았다.
+
+- **옮기지 않은 것:** `PROTOBUF_C__API` 위치 오류 · `<pthread.h>` 무조건 include · Windows 스택
+  판별 · musl(Linux 일반화·메인 스레드 `RLIMIT_STACK`) · `Summary` 오류 경로 누수 · `protobuf-c.c`
+  카운터 주석의 모순.
+- **이 형상에서 문제가 되지 않는 이유:** 모두 MSVC·Windows·musl 에서만 드러나거나, 쓰는 쪽이
+  호출하지 않는 경로(`Summary`)이거나, 주석이다.
+- ⚠️ **Windows·musl 에서는 이 fork 의 가드가 넘치기 전에 걸리지 않을 수 있다.** 2MB fallback 이
+  기본 스레드 스택보다 클 수 있다(MSVC 링커 기본값 1MB, musl 실측 약 130kB). 그 플랫폼에서 Go 로 쓸 때의 거동은
+  재지 않았다. 그쪽 빌드를 시작하기 전에 해당 수정을 먼저 옮긴다.
+
+행별 근거·#366 커밋·다시 볼 조건:
+[`GOOSEDB_FORK.md`](GOOSEDB_FORK.md#libpg_query366-과의-차이--의도적으로-옮기지-않은-것).
+
 ## Upstream contribution — pganalyze/libpg_query#366
 
 **All C changes here have been submitted upstream.** The problem is not specific
