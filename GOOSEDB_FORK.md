@@ -132,6 +132,23 @@ Both are fixed the same way as the protobuf path. Found while porting these
 changes to libpg_query, whose primary C entry point is the JSON one; pg_query_go
 exposes `ParseToJSON` too, so this was reachable from Go as well.
 
+**`v6.2.2-goosedb.4`** — `parser/pg_query.c` did not compile with GCC 14 on
+glibc. `pthread_getattr_np()` is a GNU extension that glibc declares only under
+`_GNU_SOURCE`, and nothing defined it, so the call was an implicit function
+declaration: a warning up to GCC 13, an error from GCC 14. macOS never takes
+that branch (`__APPLE__` comes first), which is why every darwin build and test
+stayed green; the first compiler to see it was the manylinux_2_28 image
+(gcc-toolset-14, glibc 2.28). Fixed by defining `_GNU_SOURCE` at the top of
+`pg_query.c`, before the first `#include` — `<features.h>` latches the feature
+macros on the first system header, so a later define has no effect. It is kept
+to that one file rather than added to the cgo `CFLAGS`: the pregenerated
+`pg_config.h` sets `STRERROR_R_INT`, which assumes the XSI `strerror_r`, and a
+package-wide `_GNU_SOURCE` would hand `src_port_strerror.c` the GNU prototype
+instead. Verified in that image: the file compiles cleanly under `-Wall`, the
+Go test suite passes, and deep input returns `stack depth limit exceeded`
+instead of killing the process (`chain` 24000 on the protobuf path, `chain`
+204800 on both paths) while the shallow control (`OR` ×100000) still parses.
+
 ## Maintaining this fork
 
 **`make update_source` erases every change in this document.** The `parser/`

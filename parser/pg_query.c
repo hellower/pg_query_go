@@ -1,3 +1,20 @@
+/*
+ * goosedb fork: pg_query_arm_stack_guard() calls pthread_getattr_np() on
+ * glibc. That is a GNU extension, and glibc only declares it when _GNU_SOURCE
+ * is defined. The feature macros are latched by <features.h> the first time
+ * any system header is included, so the define has to come before the first
+ * #include -- pg_query.h already pulls in system headers. Without it the call
+ * is an implicit declaration, which GCC 14 rejects as an error.
+ *
+ * Scoped to this translation unit on purpose: PostgreSQL defines _GNU_SOURCE
+ * for every file on Linux (src/template/linux), but libpg_query's pregenerated
+ * pg_config.h was not produced that way, and flipping it package-wide would
+ * change the prototypes other files see (strerror_r being the known one).
+ */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "pg_query.h"
 #include "pg_query_internal.h"
 
