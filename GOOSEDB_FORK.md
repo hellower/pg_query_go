@@ -25,8 +25,8 @@ way, so `max_stack_depth_bytes` was stuck at its 100kB compile-time default.
 **2. libpg_query's own recursive walkers never call the guard.**
 Every walker inherited from PostgreSQL calls `check_stack_depth()`
 (`copyfuncs.c`, `nodeFuncs.c`, `equalfuncs.c` all do). The walkers libpg_query
-added — the protobuf serializer, the protobuf reader, the deparser — did not,
-and neither did the vendored protobuf-c runtime. So even with the guard armed,
+added — the protobuf and JSON serializers, the protobuf reader, the deparser,
+the normalize walker — did not, and neither did the vendored protobuf-c runtime. So even with the guard armed,
 nothing on the paths that actually overflow would have consulted it.
 
 ## Changes against v6.2.2 (complete list)
@@ -49,8 +49,10 @@ at the outermost frame of the current call.
 | File | Function | Note |
 |---|---|---|
 | `parser/pg_query_outfuncs_protobuf.c` | `_outNode` | Single dispatcher every nesting level of the serializer passes through. |
+| `parser/pg_query_outfuncs_json.c` | `_outNode` | Same, for the JSON serializer (`v6.2.2-goosedb.3`). |
 | `parser/pg_query_readfuncs_protobuf.c` | `_readNode` | Same, for the reader. |
 | `parser/postgres_deparse.c` | `deparseExpr`, `deparseStmt` | The two dispatchers; expression nesting goes through the first, statement nesting through the second. |
+| `parser/pg_query_normalize.c` | `const_record_walker` | Most node types reach `raw_expression_tree_walker()`, which checks, but the `SelectStmt` case recurses into the walker directly, so a `UNION` chain never did (`v6.2.2-goosedb.5`). |
 | `parser/protobuf-c.c` | `protobuf_c_message_unpack`, `protobuf_c_message_get_packed_size` | See below. |
 
 ### protobuf-c
@@ -85,7 +87,8 @@ it is the single most expensive walker here.
 |---|---|
 | `parser/pg_query.c`, `parser/pg_query_internal.h` | Add `pg_query_protobuf_allocator`, a palloc/pfree-backed `ProtobufCAllocator`. |
 | `parser/pg_query_readfuncs_protobuf.c`, `parser/pg_query_deparse.c` | Pass that allocator to the two `*__unpack()` calls (and to the matching `free_unpacked()`), and raise `ERRCODE_STATEMENT_TOO_COMPLEX` when unpack returns NULL. Upstream left `Assert(result != NULL)` with a TODO; `Assert` is a no-op in release builds, so a NULL then faulted on the next dereference. |
-| `parser/pg_query_parse.c` | Wrap the protobuf serialization step in its own `PG_TRY`/`PG_CATCH`. `pg_query_raw_parse()` has one, but it ends before serialization runs, so an `ereport(ERROR)` raised while walking the tree had no exception stack and PostgreSQL escalated it to **FATAL** — the process exited instead of returning an error. |
+| `parser/pg_query_parse.c` | Wrap the serialization step — protobuf and JSON (`v6.2.2-goosedb.3`) — in its own `PG_TRY`/`PG_CATCH`. `pg_query_raw_parse()` has one, but it ends before serialization runs, so an `ereport(ERROR)` raised while walking the tree had no exception stack and PostgreSQL escalated it to **FATAL** — the process exited instead of returning an error. |
+| `parser/pg_query_normalize.c` | `const_record_walker`'s catch-all `PG_CATCH` re-throws `ERRCODE_STATEMENT_TOO_COMPLEX` instead of flushing it, and assigns its result instead of returning from inside `PG_TRY` (`v6.2.2-goosedb.5`). See the fix history. |
 
 Without the palloc allocator the unpack guard is not usable at all: the longjmp
 would abandon every submessage protobuf-c had malloc'ed, an unbounded leak on a
@@ -148,6 +151,50 @@ instead. Verified in that image: the file compiles cleanly under `-Wall`, the
 Go test suite passes, and deep input returns `stack depth limit exceeded`
 instead of killing the process (`chain` 24000 on the protobuf path, `chain`
 204800 on both paths) while the shallow control (`OR` ×100000) still parses.
+
+**`v6.2.2-goosedb.5`** — `Normalize` was not safe on deep input, in three ways,
+all in `const_record_walker()` in `parser/pg_query_normalize.c`. Found while
+validating the upstream PR (libpg_query#366, commit `ee79548` there); ported
+from it. The consuming repository does not call `Normalize`, so no consumer
+reached it, but the fork's purpose is that no entry point can.
+
+1. *Partial result reported as success.* The walker's catch-all case wraps
+   `raw_expression_tree_walker()` in a `PG_TRY` whose `PG_CATCH` flushes every
+   error. It predates the guard, but once the walker could raise `stack depth
+   limit exceeded` it swallowed that too, and the walk carried on from the
+   next sibling. `SELECT 1+1+…` ×24000 came back with no error and only some of
+   its constants replaced (measured: 10,073 placeholders out of 250,001 at
+   ×250000). The catch now re-throws `ERRCODE_STATEMENT_TOO_COMPLEX`.
+2. *Crash on a long `UNION` chain.* `SelectStmt` recurses into
+   `const_record_walker()` directly for each clause, so a chain of set
+   operations never reached the check in `raw_expression_tree_walker()`.
+   `UNION ALL` ×100000 still killed the Go test process (and ×5000 did on a
+   512kB thread, measured on the libpg_query tree). The walker now checks on
+   entry.
+3. *longjmp into a dead frame.* The same case returned from inside `PG_TRY`,
+   which skips `PG_END_TRY` and leaves `PG_exception_stack` pointing at a frame
+   that has returned. An error raised later — once a sibling clause had been
+   walked — jumped into it. Measured with (1) and (2) fixed but this left in:
+   on darwin/arm64 `SELECT 1 FROM t WHERE x = 1+1+…` grew past 60GB of RSS in
+   ten seconds and `SELECT 1, 1+1+…` was killed by the OS; on linux/amd64 one
+   died with SIGSEGV and the other passed a 1GB RSS cap. A single deep
+   expression or a `UNION` chain did not show it. The result is now
+   assigned and returned after `PG_END_TRY`.
+
+Each fix was reverted on its own and `normalize_stack_depth_test.go` failed
+each time, on darwin/arm64 and in the manylinux_2_28 image (linux/amd64, GCC
+14.2). Because the regressions are a crash and an allocation loop, every case
+runs in a child process under a 60s deadline and a 1GB RSS cap; cases peak
+below 100MB when the walker behaves (measured on darwin/arm64). Inputs below the limit normalize exactly as
+before (a wide `OR` list of 20,000 constants included), and the full Go test
+suite passes on both platforms.
+
+This is only reachable from `Normalize`/`NormalizeUtility`. The PL/pgSQL
+statement walker (`stmts_walker` in `pg_query_parse_plpgsql.c`) has the same
+flush-everything catch but was left alone on purpose: it looks only for
+top-level `CREATE FUNCTION`/`DO` statements, which cannot sit below expression
+depth, so a truncated walk cannot change its result; and its caller has no
+`PG_TRY` of its own, so re-throwing there would turn the error into FATAL.
 
 ## Maintaining this fork
 
@@ -252,6 +299,19 @@ Power BI, Superset, pgbench)을 **하드코딩된 fingerprint** 로 찾는다 �
    처리뿐이다. 18 계열의 다른 fingerprint 변경 — PostgreSQL 18 파스 트리 변경이나
    libpg_query 자체의 변경(예: libpg_query#358: TransactionStmt 옵션이 이제 `BEGIN` /
    `START TRANSACTION` 에 반영된다) — 은 여전히 키를 움직일 수 있다.
+5. 🚨 **그 릴리스가 libpg_query#349(protobuf-c → upb)를 포함하면 따로 확인한다.** 메인테이너가
+   #366 대신 택하겠다고 한 변경이고, 2026-09-15 실측(#349 head `8f3319b` 대 `18-latest`)에서
+   세 가지가 나왔다.
+   - decode 깊이 기본 한도 100 이 `Deparse` 를 평범한 쿼리에서 실패시킨다 — 23컬럼 `||` CSV
+     연결(783B), 스칼라 서브쿼리 16단, `1+1` 47항. 이 fork 의 현재 `Deparse` 경계는
+     1,829(darwin/arm64)·2,110(linux/amd64) 항이다. 쓰는 쪽은 클라이언트 SQL 을 `Deparse`
+     로 되돌리므로 한도를 설정할 수 없다면 이관할 수 없다.
+   - encode 한도 `0xFFFF` 초과 시 serialize NULL 을 검사하지 않아 `pg_query_parse_protobuf`
+     가 오류 없이 `len=0` 을 낸다(스택 16MB 이상에서 재현).
+   - 워커 크래시(JSON·normalize·summary)는 그대로이고, upb encode 는 `18-latest` 보다 약 21%
+     얕은 깊이에서 죽는다. #366 의 가드가 함께 들어가지 않았다면 이 fork 의 가드를 upb 판
+     위에 다시 얹어야 한다.
+   상세: [#349 코멘트](https://github.com/pganalyze/libpg_query/pull/349#issuecomment-5667112465).
 
 ## Upstreaming
 
@@ -265,7 +325,7 @@ the previous section). Their places in libpg_query at tag `17-6.2.2`:
 
 | this fork | libpg_query |
 |---|---|
-| `parser/pg_query.c`, `pg_query_parse.c`, `pg_query_deparse.c`, `pg_query_outfuncs_protobuf.c`, `pg_query_readfuncs_protobuf.c`, `postgres_deparse.c`, `pg_query_internal.h` | `src/` |
+| `parser/pg_query.c`, `pg_query_parse.c`, `pg_query_deparse.c`, `pg_query_outfuncs_protobuf.c`, `pg_query_outfuncs_json.c`, `pg_query_readfuncs_protobuf.c`, `pg_query_normalize.c`, `postgres_deparse.c`, `pg_query_internal.h` | `src/` |
 | `parser/src_backend_tcop_postgres.c` | `src/postgres/` |
 | `parser/protobuf-c.c`, `parser/include/protobuf-c.h`, `parser/include/protobuf-c/protobuf-c.h` | `vendor/protobuf-c/` — itself vendored third-party code |
 

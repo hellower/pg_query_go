@@ -2,6 +2,7 @@
 #include "pg_query_internal.h"
 #include "pg_query_fingerprint.h"
 
+#include "miscadmin.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
 #include "parser/scansup.h"
@@ -374,6 +375,14 @@ static bool const_record_walker(Node *node, pgssConstLocations *jstate)
 
 	if (node == NULL) return false;
 
+	/*
+	 * NOTE (goosedb fork): most node types reach raw_expression_tree_walker(),
+	 * which checks the stack itself, but SelectStmt recurses into this function
+	 * directly for every clause, so a long UNION chain never passes through
+	 * that check.
+	 */
+	check_stack_depth();
+
 	switch (nodeTag(node))
 	{
 		case T_A_Const:
@@ -584,16 +593,39 @@ static bool const_record_walker(Node *node, pgssConstLocations *jstate)
 			}
 		default:
 			{
+				/*
+				 * NOTE (goosedb fork): assign rather than return from inside
+				 * PG_TRY. Returning skips PG_END_TRY, which leaves
+				 * PG_exception_stack pointing at this frame after it is gone,
+				 * so a later error would longjmp into a dead stack frame.
+				 */
+				result = false;
 				PG_TRY();
 				{
-					return raw_expression_tree_walker(node, const_record_walker, (void*) jstate);
+					result = raw_expression_tree_walker(node, const_record_walker, (void*) jstate);
 				}
 				PG_CATCH();
 				{
+					ErrorData  *edata;
+
 					MemoryContextSwitchTo(normalize_context);
+					edata = CopyErrorData();
+
+					/*
+					 * NOTE (goosedb fork): hitting the stack limit means the
+					 * rest of the tree was not walked. Swallowing that would
+					 * return a query that still contains some of its constants
+					 * as if it had been normalized, so let the caller see the
+					 * error instead.
+					 */
+					if (edata->sqlerrcode == ERRCODE_STATEMENT_TOO_COMPLEX)
+						PG_RE_THROW();
+
 					FlushErrorState();
+					result = false;
 				}
 				PG_END_TRY();
+				return result;
 			}
 	}
 
