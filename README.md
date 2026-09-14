@@ -189,7 +189,7 @@ rather than length: `SELECT true OR true …` ×100000 (800KB, nesting depth 11)
 | `v6.2.2-goosedb.2` | Allocator mismatch in `pg_query_deparse_comments_for_query` — the unpack had been switched to the palloc allocator but the matching `free_unpacked()` still passed `NULL`, handing palloc'd memory to the default allocator's `free()`. Found by libpg_query's own test suite while porting upstream. |
 | `v6.2.2-goosedb.3` | The JSON output path was still unguarded — only the protobuf serializer had the check, and only the protobuf entry point had its own `PG_TRY`. |
 | `v6.2.2-goosedb.4` | `parser/pg_query.c` did not compile with GCC 14 on glibc: `pthread_getattr_np()` needs `_GNU_SOURCE`, which nothing defined. |
-| `v6.2.2-goosedb.5` | `Normalize` returned a partially normalized query as success on deep input (the walker's catch-all flushed the stack-depth error), a long `UNION` chain still killed the process, and an error after a completed sibling clause longjmp'ed into a dead frame. Found while validating libpg_query#366; ported from its commit `ee79548`. |
+| `v6.2.2-goosedb.5` | `Normalize` returned a partially normalized query as success on deep input (the walker's catch-all flushed the stack-depth error), a long `UNION` chain still killed the process, and an error after a completed sibling clause longjmp'ed into a dead frame. Found while validating libpg_query#366; ported from its commit `552dfe8`. |
 
 ## Upstream contribution — pganalyze/libpg_query#366
 
@@ -235,7 +235,7 @@ killed by it.
 - **Status (2026-09-15):** the maintainer replied that the plan is to switch to
   upb instead ([#349](https://github.com/pganalyze/libpg_query/pull/349)). It was
   measured against this fix and does not cover it — see the 🚨 section at the
-  top. #366 now also carries the normalize fix (`ee79548`) and offers to rebase
+  top. #366 now also carries the normalize fix (`552dfe8`) and offers to rebase
   onto #349, dropping the protobuf-c part.
 
 **If that PR is merged, this fork should be retired** in favour of the upstream

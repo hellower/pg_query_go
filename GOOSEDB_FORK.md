@@ -154,7 +154,7 @@ instead of killing the process (`chain` 24000 on the protobuf path, `chain`
 
 **`v6.2.2-goosedb.5`** — `Normalize` was not safe on deep input, in three ways,
 all in `const_record_walker()` in `parser/pg_query_normalize.c`. Found while
-validating the upstream PR (libpg_query#366, commit `ee79548` there); ported
+validating the upstream PR (libpg_query#366, commit `552dfe8` there); ported
 from it. The consuming repository does not call `Normalize`, so no consumer
 reached it, but the fork's purpose is that no entry point can.
 
